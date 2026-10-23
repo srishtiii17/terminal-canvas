@@ -2,7 +2,7 @@
 
 Run on each laptop:
 
-    python app.py [--interface 192.168.1.23]
+    python app.py [--interface 192.168.1.23] [--load FILE] [--save FILE]
 
 Responsibilities are split so the logic is testable without a terminal:
 
@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import queue
 import sys
 from typing import Callable, Optional
 
 import config
 import network
+import persistence
 import protocol
 from canvas import BLANK, DEFAULT_COLOR, Canvas, CanvasError
 
@@ -40,7 +42,9 @@ MAX_REMOTE_EVENTS_PER_FRAME = 500
 
 COLOR_NAMES = ["default", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
 
-HELP_TEXT = "Arrows move  Space draw  p pen  e erase  b brush  0-7 colour  X clear all  q quit"
+# S and L come last so a narrow terminal truncates them, not the drawing keys.
+HELP_TEXT = ("Arrows move  Space draw  p pen  e erase  b brush  0-7 colour  X clear all  "
+             "q quit  S save  L load")
 
 LOG_FILE = "terminal_canvas.log"
 
@@ -50,6 +54,9 @@ class CanvasApp:
 
     Keys arrive as strings: "UP", "DOWN", "LEFT", "RIGHT", "ESC", "CTRL_C",
     "RESIZE", or a single printable character.
+
+    S saves the canvas to `save_path` and L replaces it with `load_path`.
+    Both are local only: loading sends nothing to other peers.
     """
 
     def __init__(
@@ -60,8 +67,12 @@ class CanvasApp:
         network_ok: Callable[[], bool] = lambda: True,
         network_label: str = "",
         network_stats: Callable[[], dict] = dict,
+        save_path: str = persistence.DEFAULT_FILE,
+        load_path: str = persistence.DEFAULT_FILE,
     ) -> None:
         self.canvas = canvas
+        self.save_path = save_path
+        self.load_path = load_path
         self.inbox = inbox
         self.network_label = network_label
         # Returns SequenceTracker.totals(): "missing" and "duplicates" counts.
@@ -118,6 +129,10 @@ class CanvasApp:
             self.color = int(key)
         elif key == "X":
             self.clear_all()
+        elif key == "S":
+            self.save()
+        elif key == "L":
+            self.load()
         elif key in ("q", "Q"):
             self.running = False
         else:
@@ -161,6 +176,27 @@ class CanvasApp:
         self.canvas.apply_event(event)
         self._send_event(event)
         self.message = "Canvas cleared for all peers"
+
+    def save(self) -> bool:
+        """Save the canvas to save_path; reports the outcome in the message line."""
+        try:
+            persistence.save_canvas(self.canvas, self.save_path)
+        except persistence.PersistenceError as exc:
+            self.message = f"Save failed: {exc}"
+            return False
+        self.message = f"Saved to {self.save_path}"
+        return True
+
+    def load(self) -> bool:
+        """Replace the local canvas with load_path. Nothing is sent to peers,
+        and on failure the canvas is unchanged."""
+        try:
+            persistence.load_canvas(self.canvas, self.load_path)
+        except persistence.PersistenceError as exc:
+            self.message = f"Load failed: {exc}"
+            return False
+        self.message = f"Loaded {self.load_path} (local only; peers not updated)"
+        return True
 
     def _send_event(self, event: dict) -> None:
         try:
@@ -346,6 +382,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--interface", default=config.INTERFACE_ADDRESS,
         help="IPv4 address of the network interface to use, e.g. this laptop's "
              f"Wi-Fi address from ipconfig (default: {config.INTERFACE_ADDRESS})")
+    parser.add_argument(
+        "--load", metavar="FILE",
+        help="load this canvas file at startup (local only; peers are not "
+             "updated). L reloads it")
+    parser.add_argument(
+        "--save", metavar="FILE",
+        help="save the canvas to this file on exit. S also saves to it")
     return parser.parse_args(argv)
 
 
@@ -363,6 +406,20 @@ def main(argv=None) -> int:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.basicConfig(level=logging.WARNING, handlers=[handler])
 
+    # S and L use --save/--load; with only one given, both keys use it.
+    save_path = args.save or args.load or persistence.DEFAULT_FILE
+    load_path = args.load or args.save or persistence.DEFAULT_FILE
+    if args.save and not os.path.isdir(os.path.dirname(os.path.abspath(args.save))):
+        print(f"Cannot save to {args.save}: its folder does not exist.", file=sys.stderr)
+        return 1
+    canvas = Canvas()
+    if args.load:
+        try:
+            persistence.load_canvas(canvas, args.load)
+        except persistence.PersistenceError as exc:
+            print(f"Could not load canvas: {exc}", file=sys.stderr)
+            return 1
+
     group = f"{config.MULTICAST_GROUP}:{config.MULTICAST_PORT}"
     inbox: "queue.Queue[dict]" = queue.Queue()
     try:
@@ -375,13 +432,15 @@ def main(argv=None) -> int:
         return 1
 
     app = CanvasApp(
-        Canvas(),
+        canvas,
         network.send_event,
         inbox,
         network_ok=lambda: peer.running,
         network_stats=peer.tracker.totals,
         network_label=f"group {group}  via {args.interface}  "
                       f"(sending from {peer.local_address[0]}:{peer.local_address[1]})",
+        save_path=save_path,
+        load_path=load_path,
     )
     try:
         curses.wrapper(lambda stdscr: run_loop(app, CursesView(stdscr, curses)))
@@ -389,6 +448,13 @@ def main(argv=None) -> int:
         pass  # Ctrl+C: curses.wrapper has already restored the terminal.
     finally:
         network.stop_network()
+        if args.save:
+            try:
+                persistence.save_canvas(app.canvas, args.save)
+            except persistence.PersistenceError as exc:
+                print(f"Could not save canvas: {exc}", file=sys.stderr)
+            else:
+                print(f"Saved canvas to {args.save}.")
     print(f"Stopped. Sent {app.sent_count} events, received {app.received_count}.")
     return 0
 

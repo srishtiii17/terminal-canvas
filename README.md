@@ -17,6 +17,7 @@ UDP to an IPv4 multicast group. There is no central application server.
 | 4 | Two-laptop test with Wireshark capture | **Not yet performed** (see below) |
 | 5 | Per-sender duplicate detection and gap tracking (`tracker.py`), with no protocol change | Done. Tested on one laptop |
 | 6 | Final report (`FINAL_PROJECT_REPORT.docx`) | Done. Two-laptop evidence still to be added |
+| F | Local canvas save/load (`persistence.py`), local only, with no protocol change | Done. Automated tests |
 | Later | Peer ID in the frame, loss recovery, late join, conflict ordering | Proposed only. See the roadmap |
 
 Nothing has been verified between two physical laptops yet.
@@ -30,6 +31,7 @@ Nothing has been verified between two physical laptops yet.
   network.py  ── UDP ─▶  239.255.0.1:5005  ◀─ UDP ── network.py
   tracker.py      (IPv4 multicast, TTL 1, IGMP)      tracker.py
   protocol.py                                        protocol.py
+  persistence.py  local JSON save/load (no network)  persistence.py
 ```
 
 - **Network layer:** IPv4 Class D multicast group `239.255.0.1`. Hosts join
@@ -108,7 +110,18 @@ a VirtualBox host-only adapter (`192.168.56.1`).
 ```sh
 python app.py                          # uses INTERFACE_ADDRESS from config.py
 python app.py --interface 192.168.1.23
+python app.py --load drawing.json      # start from a saved canvas
+python app.py --save drawing.json      # save the canvas when the app exits
 ```
+
+| Option | Meaning |
+| --- | --- |
+| `--interface ADDR` | IPv4 address of the network interface to use |
+| `--load FILE` | Load `FILE` before joining the group. If it cannot be loaded, the app prints why and exits with status 1 without joining |
+| `--save FILE` | Save the canvas to `FILE` when the app exits (`q`, Ctrl+C, or an error). The app exits at startup if `FILE`'s folder does not exist |
+
+Without these options the app behaves as before and creates no file unless
+you press `S`. See [Saving and loading](#saving-and-loading-persistencepy).
 
 The terminal must be at least 62 columns by 23 rows. If it is smaller, the app
 asks you to enlarge it. The top line shows the group, the interface and the
@@ -127,6 +140,8 @@ source address the app sends from. The status line below the canvas shows:
 | `b`, then a character | Choose the brush character (Esc cancels) |
 | `0`–`7` | Colour: default, red, green, yellow, blue, magenta, cyan, white |
 | `X` (Shift+x) | Clear the canvas for all peers |
+| `S` (Shift+s) | Save the canvas to a file (local only) |
+| `L` (Shift+l) | Replace this canvas with the saved file (local only; peers are not updated) |
 | `q` or Ctrl+C | Quit |
 
 What happens when you draw:
@@ -142,6 +157,69 @@ What happens when you draw:
   file is created only if something is logged.
 
 To try it on one laptop, open two terminals and run `python app.py` in each.
+
+## Saving and loading (`persistence.py`)
+
+Saving and loading are **local only**. Loading replaces this peer's canvas
+and sends nothing to the group, so other peers keep their own canvases. To
+share a loaded drawing, every peer loads the same file. The UDP protocol,
+the 13-byte frame, the group and the port are unchanged.
+
+**Which file the keys use:**
+
+| Options given | `S` saves to | `L` loads from |
+| --- | --- | --- |
+| none | `canvas.json` in the current folder | `canvas.json` in the current folder |
+| `--load A` | `A` | `A` |
+| `--save B` | `B` | `B` |
+| `--load A --save B` | `B` | `A` |
+
+**Saving is atomic.** The canvas is written to a temporary file in the same
+folder, flushed to disk and closed, and then `os.replace()` moves it over
+the target. If anything fails, the existing file is left as it was, the
+temporary file is deleted, and the message line shows `Save failed: ...`.
+
+**Loading is validated before anything changes.** If the file is rejected,
+the canvas stays as it was and the message line shows `Load failed: ...`
+(with `--load`, the app prints the reason and exits instead). A file is
+rejected if:
+
+- it cannot be read, is not UTF-8, or is larger than 4 MiB (checked before
+  parsing)
+- it is not valid JSON, or not a terminal canvas save (`"format"` is missing
+  or different)
+- `"version"` is not `1`, or there are unknown top-level fields
+- `"width"`/`"height"` do not match this canvas (60x18 by default)
+- `"cells"` is not a list, or lists more cells than the canvas holds
+- a cell does not have exactly `x`, `y`, `char` and `color`, is outside the
+  canvas, or repeats a position
+- a `char` is not one printable ASCII character (`0x20`–`0x7E`), or a `color`
+  is not an integer from 0 to 255
+
+### File format (version 1)
+
+UTF-8 JSON:
+
+```json
+{
+ "format": "terminal-canvas",
+ "version": 1,
+ "width": 60,
+ "height": 18,
+ "cells": [
+  {"x": 20, "y": 10, "char": "#", "color": 2},
+  {"x": 21, "y": 10, "char": "*", "color": 4}
+ ]
+}
+```
+
+- Only occupied cells are stored: cells whose character is not a space or
+  whose colour is not 0. All other cells load as blank.
+- Cells are listed row by row, left to right.
+- Version 1 has no per-cell timestamps, because the canvas has none. A later
+  format that adds fields, such as logical timestamps for conflict
+  resolution, must use a new version number. Version 1 readers reject unknown
+  cell fields instead of silently ignoring them.
 
 ## Two-laptop test (Stage 4, still to be done)
 
@@ -317,6 +395,21 @@ canvas.row_text(y) / canvas.row_colors(y)
   `False`.
 - **Errors:** a malformed event, character or colour raises `CanvasError`, a
   subclass of `ValueError`.
+- **Snapshots:** `canvas.snapshot()` returns `{"width", "height", "cells"}`
+  with the occupied cells. `canvas.restore(snapshot)` replaces every cell
+  with it. It validates the whole snapshot first, so on `CanvasError` the
+  canvas is unchanged.
+
+### `persistence.py`
+
+```python
+save_canvas(canvas, path)   # atomic write of the version 1 JSON file
+load_canvas(canvas, path)   # replace canvas contents with the file
+```
+
+Both raise `PersistenceError`, a subclass of `ValueError`, with a readable
+reason. A failed load leaves the canvas unchanged, and a failed save leaves
+any existing file unchanged.
 
 ## Running tests
 
@@ -328,7 +421,11 @@ python -m unittest discover -s tests -v
 ```
 
 The tests need no third-party packages, no terminal and no curses. The suite
-has 155 tests: 25 protocol, 52 network, 19 tracker, 19 canvas and 40 app.
+has 207 tests: 25 protocol, 52 network, 19 tracker, 19 canvas, 40 app and 52
+persistence. The persistence tests (`tests/test_persistence.py`) use
+temporary folders and cover saving and loading, rejected files, atomic
+writes, the `S`/`L` keys and the `--load`/`--save` options. Run them alone
+with `python -m unittest tests.test_persistence -v`.
 
 | Kind | Where | Touches the network? |
 | --- | --- | --- |
@@ -357,6 +454,11 @@ Wireshark capture on the receiving laptop. Each IPv4 packet should be 41 bytes
 (55 bytes on the wire including the 14-byte Ethernet header).
 
 ## Limitations
+
+- **Saving and loading are local only.** Loading a file does not update
+  other peers, so after `L` this canvas can differ from theirs until
+  everyone loads the same file. A save made on a canvas of a different size
+  cannot be loaded.
 
 - **UDP does not guarantee delivery.** Frames can be lost, duplicated or
   reordered, and there are no acknowledgements or retransmissions.

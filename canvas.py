@@ -92,6 +92,58 @@ class Canvas:
                 raise CanvasError(f"DRAW event is missing {exc.args[0]!r}") from None
         raise CanvasError(f"unsupported event type {event_type!r}")
 
+    def snapshot(self) -> dict:
+        """Return the canvas as plain data: its size and every occupied cell.
+
+        A cell is occupied when its (char, color) differs from a blank cell.
+        Cells are listed row by row, left to right.
+        """
+        cells = [
+            {"x": x, "y": y, "char": self._chars[y][x], "color": self._colors[y][x]}
+            for y in range(self.height)
+            for x in range(self.width)
+            if (self._chars[y][x], self._colors[y][x]) != (BLANK, DEFAULT_COLOR)
+        ]
+        return {"width": self.width, "height": self.height, "cells": cells}
+
+    def restore(self, snapshot) -> None:
+        """Replace every cell with the contents of a snapshot() result.
+
+        Cells not listed become blank. The whole snapshot is validated first,
+        so on CanvasError the canvas is unchanged.
+        """
+        if not isinstance(snapshot, dict):
+            raise CanvasError(f"snapshot must be a dict, got {type(snapshot).__name__}")
+        width, height = snapshot.get("width"), snapshot.get("height")
+        if (width, height) != (self.width, self.height) or not (_is_int(width) and _is_int(height)):
+            raise CanvasError(
+                f"canvas size {width!r}x{height!r} does not match {self.width}x{self.height}")
+        cells = snapshot.get("cells")
+        if not isinstance(cells, list):
+            raise CanvasError("cells must be a list")
+        if len(cells) > self.width * self.height:
+            raise CanvasError(f"{len(cells)} cells do not fit a {self.width}x{self.height} canvas")
+
+        chars = [[BLANK] * self.width for _ in range(self.height)]
+        colors = [[DEFAULT_COLOR] * self.width for _ in range(self.height)]
+        seen = set()
+        for index, cell in enumerate(cells):
+            if not isinstance(cell, dict) or set(cell) != {"x", "y", "char", "color"}:
+                raise CanvasError(f"cell {index} must have exactly x, y, char and color")
+            x, y, char, color = cell["x"], cell["y"], cell["char"], cell["color"]
+            if not self.in_bounds(x, y):
+                raise CanvasError(f"cell {index} at ({x!r}, {y!r}) is outside the canvas")
+            if (x, y) in seen:
+                raise CanvasError(f"cell {index} repeats ({x}, {y})")
+            seen.add((x, y))
+            if not isinstance(char, str) or len(char) != 1 or not " " <= char <= "~":
+                raise CanvasError(f"cell {index} char must be one printable ASCII character")
+            if not _is_int(color) or not 0 <= color <= protocol.MAX_COLOR:
+                raise CanvasError(f"cell {index} color must be an integer 0-{protocol.MAX_COLOR}")
+            chars[y][x] = char
+            colors[y][x] = color
+        self._chars, self._colors = chars, colors
+
     def row_text(self, y: int) -> str:
         return "".join(self._chars[y])
 

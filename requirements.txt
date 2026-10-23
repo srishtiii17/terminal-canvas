@@ -1,0 +1,3 @@
+# Runtime: the curses terminal UI (app.py). Python's standard library has no
+# curses module on Windows; Linux and macOS include it.
+windows-curses>=2.4; sys_platform == "win32"

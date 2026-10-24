@@ -1,3 +1,5 @@
+# Real-Time Decentralized Collaborative Terminal Canvas over UDP Multicast
+# Implementation and development by Srishti Saluja
 """Local save and load of the canvas as a JSON file.
 
 Persistence is local only: loading a file replaces this peer's canvas and

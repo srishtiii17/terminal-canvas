@@ -1,3 +1,5 @@
+# Real-Time Decentralized Collaborative Terminal Canvas over UDP Multicast
+# Implementation and development by Srishti Saluja
 """Binary wire protocol for terminal canvas events.
 
 Every datagram is exactly one fixed-size 13-byte frame. All integers are

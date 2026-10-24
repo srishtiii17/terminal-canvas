@@ -1,8 +1,11 @@
+# Real-Time Decentralized Collaborative Terminal Canvas over UDP Multicast
+# Implementation and development by Srishti Saluja
 """Terminal UI for the collaborative canvas.
 
 Run on each laptop:
 
     python app.py [--interface 192.168.1.23] [--load FILE] [--save FILE]
+                  [--protocol {1,2}] [--simulate-loss PERCENT] [--auth]
 
 Responsibilities are split so the logic is testable without a terminal:
 
@@ -21,17 +24,20 @@ On Windows curses comes from the windows-curses package (requirements.txt).
 from __future__ import annotations
 
 import argparse
+import getpass
 import logging
 import os
 import queue
 import sys
 from typing import Callable, Optional
 
+import auth
 import config
 import network
 import persistence
 import protocol
 from canvas import BLANK, DEFAULT_COLOR, Canvas, CanvasError
+from session import Session
 
 # How long getch() waits for a key, so remote events are drawn promptly even
 # when the user is idle.
@@ -48,6 +54,10 @@ HELP_TEXT = ("Arrows move  Space draw  p pen  e erase  b brush  0-7 colour  X cl
 
 LOG_FILE = "terminal_canvas.log"
 
+# With --auth the passphrase is read from this environment variable if it is
+# set, otherwise typed at a hidden prompt. It is never logged or displayed.
+PASSPHRASE_ENV = "TERMINAL_CANVAS_PASSPHRASE"
+
 
 class CanvasApp:
     """Application state and behaviour, independent of curses.
@@ -57,6 +67,11 @@ class CanvasApp:
 
     S saves the canvas to `save_path` and L replaces it with `load_path`.
     Both are local only: loading sends nothing to other peers.
+
+    With protocol v2, `session` is a session.Session: local events are
+    stamped by it before they are applied and sent, remote messages go
+    through it, and tick() runs its timers (late-join sync). Without one
+    (v1) events are applied in arrival order and tick() does nothing.
     """
 
     def __init__(
@@ -69,8 +84,10 @@ class CanvasApp:
         network_stats: Callable[[], dict] = dict,
         save_path: str = persistence.DEFAULT_FILE,
         load_path: str = persistence.DEFAULT_FILE,
+        session: Optional[Session] = None,
     ) -> None:
         self.canvas = canvas
+        self.session = session
         self.save_path = save_path
         self.load_path = load_path
         self.inbox = inbox
@@ -168,13 +185,10 @@ class CanvasApp:
             "char": char,
             "color": color,
         }
-        self.canvas.apply_event(event)
-        self._send_event(event)
+        self._apply_and_send(event)
 
     def clear_all(self) -> None:
-        event = {"type": protocol.CLEAR}
-        self.canvas.apply_event(event)
-        self._send_event(event)
+        self._apply_and_send({"type": protocol.CLEAR})
         self.message = "Canvas cleared for all peers"
 
     def save(self) -> bool:
@@ -198,6 +212,13 @@ class CanvasApp:
         self.message = f"Loaded {self.load_path} (local only; peers not updated)"
         return True
 
+    def _apply_and_send(self, event: dict) -> None:
+        if self.session is not None:
+            # Stamp first, so the local copy and the sent copy are identical.
+            event = self.session.stamp(event)
+        self.canvas.apply_event(event)
+        self._send_event(event)
+
     def _send_event(self, event: dict) -> None:
         try:
             self._send(event)
@@ -220,18 +241,39 @@ class CanvasApp:
                 break
             taken += 1
             try:
-                self.canvas.apply_event(event)
+                if self.session is not None:
+                    self.session.receive(event)
+                else:
+                    self.canvas.apply_event(event)
             except CanvasError:
                 self.rejected_count += 1
             else:
-                self.received_count += 1
+                # v2 control messages (sync, recovery) are not drawing events.
+                if event.get("type") in (protocol.DRAW, protocol.CLEAR):
+                    self.received_count += 1
             self.dirty = True
+        self._show_notices()
 
         if not self._network_warned and not self._network_ok():
             self._network_warned = True
             self.message = f"Network receiver stopped; see {LOG_FILE}. Restart the app."
             self.dirty = True
         return taken
+
+
+    def tick(self) -> None:
+        """Run the v2 session's timers; does nothing in v1."""
+        if self.session is None:
+            return
+        if self.session.tick():
+            self.dirty = True
+        self._show_notices()
+
+    def _show_notices(self) -> None:
+        if self.session is not None and self.session.notices:
+            self.message = self.session.notices[-1]
+            self.session.notices.clear()
+            self.dirty = True
 
 
 class CursesView:
@@ -320,6 +362,8 @@ class CursesView:
         stats = app.network_stats()
         if stats:
             status += f"  Miss {stats['missing']}  Dup {stats['duplicates']}"
+        if app.session is not None and app.session.status():
+            status += f"  {app.session.status()}"
         if app.rejected_count or app.send_errors:
             status += f"  Rejected {app.rejected_count}  SendErr {app.send_errors}"
         self._put(canvas.height + 3, 0, status, cols)
@@ -358,6 +402,7 @@ def run_loop(app: CanvasApp, view) -> None:
     """Main loop: apply remote events, redraw when needed, handle one key."""
     while app.running:
         app.process_remote_events()
+        app.tick()
         if app.dirty:
             view.render(app)
             app.dirty = False
@@ -383,6 +428,19 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="IPv4 address of the network interface to use, e.g. this laptop's "
              f"Wi-Fi address from ipconfig (default: {config.INTERFACE_ADDRESS})")
     parser.add_argument(
+        "--protocol", type=int, choices=(1, 2), default=1,
+        help="wire protocol: 1 is the original 13-byte frame (default); 2 adds "
+             "a peer ID header. Every peer in a session must use the same one")
+    parser.add_argument(
+        "--simulate-loss", type=float, default=0.0, metavar="PERCENT",
+        help="drop this percentage (0-90) of received datagrams on purpose, "
+             "to demonstrate loss recovery on one laptop (default: 0)")
+    parser.add_argument(
+        "--auth", action="store_true",
+        help="authenticate every message with HMAC-SHA256 using a shared "
+             f"passphrase (needs --protocol 2; read from ${PASSPHRASE_ENV} or a "
+             "hidden prompt). Integrity only: messages are not encrypted")
+    parser.add_argument(
         "--load", metavar="FILE",
         help="load this canvas file at startup (local only; peers are not "
              "updated). L reloads it")
@@ -394,6 +452,22 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if not 0 <= args.simulate_loss <= 90:
+        print("--simulate-loss must be from 0 to 90 (percent).", file=sys.stderr)
+        return 1
+    auth_key = None
+    if args.auth:
+        if args.protocol != 2:
+            print("--auth needs --protocol 2.", file=sys.stderr)
+            return 1
+        passphrase = os.environ.get(PASSPHRASE_ENV) or getpass.getpass("Shared passphrase: ")
+        try:
+            auth_key = auth.derive_key(passphrase)
+        except ValueError as exc:
+            print(f"Cannot enable authentication: {exc}.", file=sys.stderr)
+            return 1
+        finally:
+            passphrase = None
     curses = load_curses()
     if curses is None:
         print("curses is not available. On Windows install it with:\n"
@@ -423,7 +497,10 @@ def main(argv=None) -> int:
     group = f"{config.MULTICAST_GROUP}:{config.MULTICAST_PORT}"
     inbox: "queue.Queue[dict]" = queue.Queue()
     try:
-        peer = network.start_network(inbox.put, interface=args.interface)
+        peer = network.start_network(inbox.put, interface=args.interface,
+                                     wire_version=args.protocol,
+                                     loss_rate=args.simulate_loss / 100,
+                                     auth_key=auth_key)
     except OSError as exc:
         print(f"Could not join {group} on interface {args.interface}: {exc}\n"
               "Check that this address is this computer's current IPv4 address "
@@ -431,17 +508,28 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
+    label = (f"group {group}  via {args.interface}  "
+             f"(sending from {peer.local_address[0]}:{peer.local_address[1]})")
+    if args.protocol == 2:
+        label += f"  v2 peer {peer.peer_id:08x}"
+    if args.simulate_loss:
+        label += f"  SIMULATED LOSS {args.simulate_loss:g}%"
+    if auth_key is not None:
+        label += "  HMAC on"
     app = CanvasApp(
         canvas,
         network.send_event,
         inbox,
         network_ok=lambda: peer.running,
         network_stats=peer.tracker.totals,
-        network_label=f"group {group}  via {args.interface}  "
-                      f"(sending from {peer.local_address[0]}:{peer.local_address[1]})",
+        network_label=label,
         save_path=save_path,
         load_path=load_path,
+        session=Session(canvas, peer) if args.protocol == 2 else None,
     )
+    if app.session is not None:
+        app.session.start()  # Late join: ask the group for its canvas.
+        app.tick()
     try:
         curses.wrapper(lambda stdscr: run_loop(app, CursesView(stdscr, curses)))
     except KeyboardInterrupt:

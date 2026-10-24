@@ -136,6 +136,59 @@ class SequenceTracker:
         stats.duplicates += 1
         return Verdict.DUPLICATE
 
+    def observe_heartbeat(self, sender: Hashable, next_seq: int) -> int:
+        """Record that `sender` has sent every number below `next_seq`.
+
+        Used by protocol v2 HEARTBEAT messages to expose tail loss (the
+        last events of a burst lost while the sender then stays quiet).
+        Numbers not yet received become missing, as for a gap; returns how
+        many became missing. A sender never heard before gets its baseline
+        here, without reporting earlier events as missing.
+        """
+        if not 0 <= next_seq < SEQ_MODULUS:
+            raise ValueError(f"sequence number out of range: {next_seq}")
+        latest = (next_seq - 1) % SEQ_MODULUS
+        with self._lock:
+            now = self._clock()
+            stream = self._streams.get(sender)
+            if stream is None:
+                stream = _Stream(latest, now)
+                stream.stats.received = 0
+                self._add_stream(sender, stream)
+                return 0
+            self._streams.move_to_end(sender)
+            stream.last_seen = now
+            distance = (latest - stream.highest) % SEQ_MODULUS
+            if not 0 < distance < HALF_RANGE:
+                return 0
+            for back in range(min(distance, self.max_missing) - 1, -1, -1):
+                stream.missing[(latest - back) % SEQ_MODULUS] = None
+            while len(stream.missing) > self.max_missing:
+                stream.missing.popitem(last=False)
+            stream.stats.gaps += distance
+            stream.highest = latest
+            return distance
+
+    def senders(self) -> list:
+        """The senders currently tracked."""
+        with self._lock:
+            return list(self._streams)
+
+    def missing(self, sender: Hashable) -> list:
+        """Remembered missing sequence numbers of one sender, oldest first."""
+        with self._lock:
+            stream = self._streams.get(sender)
+            return list(stream.missing) if stream else []
+
+    def forget_missing(self, sender: Hashable, seqs) -> None:
+        """Stop remembering numbers that will not be recovered. They stay
+        counted as missing; if one still arrives it is dropped as old."""
+        with self._lock:
+            stream = self._streams.get(sender)
+            if stream is not None:
+                for seq in seqs:
+                    stream.missing.pop(seq, None)
+
     def _add_stream(self, sender: Hashable, stream: _Stream) -> None:
         self._streams[sender] = stream
         while len(self._streams) > self.max_senders:

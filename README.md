@@ -2,82 +2,145 @@
 
 *A Serverless Peer-to-Peer Group Communication System using IPv4 Multicast and UDP.*
 
+## Project overview
+
 Peers on the same LAN draw together on a shared terminal ASCII canvas. Every
-peer runs the same program, keeps its own copy of the canvas, and is both a
-sender and a receiver. Drawing events are sent as compact binary frames over
-UDP to an IPv4 multicast group. There is no central application server.
+peer runs the same Python program, keeps its own copy of a 60 × 18 canvas,
+and is both a sender and a receiver. Each drawing action is sent once, as a
+compact binary message in a UDP datagram, to the IPv4 multicast group
+`239.255.0.1:5005`. The network delivers it to every peer that has joined
+the group. There is no central server, broker or master copy of the canvas.
 
-## Authors
+**The problem it demonstrates.** Collaborative tools such as Google Docs or
+Figma route every edit through a server, which relays one copy to each
+client. On a single LAN the network can do that delivery itself. This
+project shows how far serverless group communication can go, and which
+problems the application then has to solve itself because UDP does not:
 
-Computer Networks project team, as listed in `FINAL_PROJECT_REPORT.docx`
-and `PROJECT_ENHANCEMENT_ROADMAP.docx`:
+- lost, duplicated and reordered datagrams;
+- concurrent edits of the same cell;
+- peers that join after drawing has started;
+- forged or modified messages.
+
+**Why UDP multicast.**
+
+- One transmission reaches every group member, so the sender's cost does
+  not grow with the number of peers. Unicast would need one copy per peer.
+  Broadcast would disturb hosts that are not running the canvas.
+- Group membership is handled by the operating system and the network
+  (IGMP), not by an application server.
+- TCP is defined only between two endpoints, so it cannot carry multicast.
+  UDP adds little overhead and suits small, frequent drawing events.
+
+## Team and attribution
+
+Computer Networks project team, as listed in
+`PROJECT_ENHANCEMENT_ROADMAP.docx`:
 
 - Srishti Saluja (24BCE2587)
 - Vidushi Kapoor (24BCE2244)
 
 **Implementation and development:** Srishti Saluja
 
-## Status
+## Features
+
+| Feature | How to use it | Modules |
+| --- | --- | --- |
+| Real-time collaborative terminal canvas (draw, erase, 8 colours, clear for everyone) | always | `app.py`, `canvas.py` |
+| IPv4 UDP multicast with IGMP membership, TTL 1, interface pinning | always | `network.py`, `config.py` |
+| Protocol v1: 13-byte frame, per-sender duplicate and gap detection | default (`--protocol 1`) | `protocol.py`, `tracker.py` |
+| Protocol v2: versioned 20-byte header with a random 32-bit peer ID | `--protocol 2` | `protocol_v2.py`, `network.py` |
+| Lamport-based deterministic ordering (last writer wins, peer ID breaks ties) | v2 | `lamport.py`, `session.py`, `canvas.py` |
+| Late-join state synchronisation (`STATE_REQ` / `STATE_RESP` snapshots) | v2, automatic at start-up | `sync.py`, `session.py` |
+| Packet-loss recovery (heartbeat, NACK, retransmission, `NOT_AVAILABLE`, snapshot fallback) | v2, automatic | `recovery.py`, `network.py` |
+| Simulated packet loss, to demonstrate recovery | `--simulate-loss PERCENT` | `network.py` |
+| Optional HMAC-SHA256 authentication with a shared passphrase | `--auth` (v2 only) | `auth.py` |
+| Local canvas persistence (validated, atomic JSON save/load) | `S` / `L` keys, `--save` / `--load` | `persistence.py` |
+
+**v1 and v2 are not interoperable.** A v1 peer drops every v2 datagram,
+because none is 13 bytes long. A v2 peer drops every v1 frame, counts it,
+and logs a warning. Every peer in a session must use the same `--protocol`
+and, with `--auth`, the same passphrase.
+
+## Project status
+
+Implementation is complete, and the project review has been completed.
 
 | Stage | Scope | State |
 | --- | --- | --- |
-| 1 | Binary protocol (`protocol.py`) and multicast networking (`network.py`) | Done. Tested on one laptop |
+| 1 | Binary protocol (`protocol.py`) and multicast networking (`network.py`) | Done |
 | 2 | Enhancement roadmap (`PROJECT_ENHANCEMENT_ROADMAP.docx`) | Done |
-| 3 | `canvas.py` (canvas state) and `app.py` (`curses` UI) | Done. Tested on one laptop |
-| 4 | Two-laptop test with Wireshark capture | **Not yet performed** (see below) |
-| 5 | Per-sender duplicate detection and gap tracking (`tracker.py`), with no protocol change | Done. Tested on one laptop |
-| 6 | Final report (`FINAL_PROJECT_REPORT.docx`) | Done. Two-laptop evidence still to be added |
-| F | Local canvas save/load (`persistence.py`), local only, with no protocol change | Done. Automated tests |
-| A | Protocol v2 (`protocol_v2.py`): versioned 20-byte header with a random peer ID; `--protocol 2` | Done. Automated and one-laptop loopback tests |
-| D | Lamport timestamps and deterministic last-writer-wins (`lamport.py`, `session.py`, `canvas.py`), v2 only | Done. Automated tests |
-| C | Late-join canvas synchronization with STATE_REQ/STATE_RESP (`sync.py`), v2 only | Done. Automated and one-laptop loopback tests |
-| B | Packet-loss recovery: heartbeat, NACK, retransmission, NOT_AVAILABLE, snapshot fallback (`recovery.py`), v2 only | Done. Automated tests with simulated loss |
-| E | Optional HMAC-SHA256 authentication with a shared passphrase (`auth.py`, `--auth`), v2 only | Done. Automated tests |
+| 3 | `canvas.py` (canvas state) and `app.py` (`curses` UI) | Done |
+| 4 | Test between two physical computers | Done: Windows–macOS peer test passed |
+| 5 | Per-sender duplicate detection and gap tracking (`tracker.py`), with no protocol change | Done |
+| 6 | Final project report | Done (kept outside this repository) |
+| F | Local canvas save/load (`persistence.py`), local only, with no protocol change | Done |
+| A | Protocol v2 (`protocol_v2.py`): versioned 20-byte header with a random peer ID; `--protocol 2` | Done |
+| D | Lamport timestamps and deterministic last-writer-wins (`lamport.py`, `session.py`, `canvas.py`), v2 only | Done |
+| C | Late-join canvas synchronisation with STATE_REQ/STATE_RESP (`sync.py`), v2 only | Done |
+| B | Packet-loss recovery: heartbeat, NACK, retransmission, NOT_AVAILABLE, snapshot fallback (`recovery.py`), v2 only | Done |
+| E | Optional HMAC-SHA256 authentication with a shared passphrase (`auth.py`, `--auth`), v2 only | Done |
 
-Nothing in this repository records a test between two physical laptops.
-**Phases F, A, D, C, B and E were validated on one laptop only:**
+See [Testing and validation](#testing-and-validation) for what was tested
+and how.
 
-- unit tests;
-- an in-memory multi-peer network (`tests/simnet.py`) with fake clocks and
-  deterministic packet loss;
-- real multicast loopback between peers on the same host.
-
-**Physical Windows–Mac validation of protocol v2 (peer identity, conflict
-resolution, late join, loss recovery and authentication) remains pending.**
-
-## Architecture
+## Final architecture
 
 ```text
-  Laptop A                                           Laptop B
-  app.py      curses UI, keyboard, main loop         app.py
-  canvas.py   local canvas replica                   canvas.py
-  network.py  ── UDP ─▶  239.255.0.1:5005  ◀─ UDP ── network.py
-  tracker.py      (IPv4 multicast, TTL 1, IGMP)      tracker.py
-  protocol.py                                        protocol.py
-  persistence.py  local JSON save/load (no network)  persistence.py
-
-  v2 only (--protocol 2):
-  protocol_v2.py  20-byte versioned header, all message types
-  session.py      UI-thread coordinator: Lamport stamps, sync, recovery timers
-  lamport.py      Lamport clock          sync.py      late-join snapshots
-  recovery.py     NACK scheduling        auth.py      optional HMAC-SHA256
+                 Windows peer                                    macOS peer
+  +---------------------------------------+      +---------------------------------------+
+  | app.py          UI, keys, main loop   |      | app.py          UI, keys, main loop   |
+  | session.py      v2 coordinator        |      | session.py      v2 coordinator        |
+  |   lamport.py    Lamport clock         |      |   lamport.py    Lamport clock         |
+  |   sync.py       late-join snapshots   |      |   sync.py       late-join snapshots   |
+  |   recovery.py   heartbeat, NACKs      |      |   recovery.py   heartbeat, NACKs      |
+  | canvas.py       local replica         |      | canvas.py       local replica         |
+  | persistence.py  local JSON file       |      | persistence.py  local JSON file       |
+  | network.py      sockets, rx thread    |      | network.py      sockets, rx thread    |
+  |   tracker.py    duplicates, gaps      |      |   tracker.py    duplicates, gaps      |
+  |   protocol.py / protocol_v2.py        |      |   protocol.py / protocol_v2.py        |
+  |   auth.py       optional HMAC (v2)    |      |   auth.py       optional HMAC (v2)    |
+  +-------------------+-------------------+      +-------------------+-------------------+
+                      ^                                              ^
+                      v                                              v
+================ IPv4 multicast group 239.255.0.1:5005 (UDP, TTL 1, IGMP) ================
 ```
+
+Inside each peer:
+
+```text
+key press -> CanvasApp -> Session.stamp() (v2) -> Canvas.apply_event() -> send_event() -> group
+group -> receive thread: decode, HMAC check (--auth), tracker -> queue.Queue
+      -> CanvasApp (main loop) -> Session.receive() (v2) / Canvas.apply_event() (v1)
+```
+
+| Component | Role |
+| --- | --- |
+| **Entry point** (`app.py`) | Parses the CLI options, joins the group, runs the `curses` loop, and always leaves the group and restores the terminal on exit. `CanvasApp` holds the state and key handling; `CursesView` is the only code that calls `curses` |
+| **Canvas** (`canvas.py`) | The local replica: a character and a colour per cell. In v2 each cell also holds the stamp of its last write, and the canvas holds a clear stamp |
+| **Network communication** (`network.py`) | `MulticastPeer` owns a receive socket that joins the group and a send socket pinned to the chosen interface. A background thread receives, decodes and filters datagrams and puts accepted messages on a queue |
+| **Protocol handling** (`protocol.py`, `protocol_v2.py`) | Encode and strictly validate the v1 13-byte frame, or the v2 header and its seven message types |
+| **Session management** (`session.py`, v2) | Runs on the UI thread. Stamps local events, applies remote ones, and drives the sync and recovery timers from `CanvasApp.tick()` at least every 50 ms |
+| **Synchronisation** (`lamport.py`, `sync.py`, v2) | Lamport ordering and late-join snapshots |
+| **Recovery** (`tracker.py`, `recovery.py`, `network.py`) | Gap detection (v1 and v2). In v2 also heartbeats, NACKs, retransmission from a 512-event history, and a snapshot fallback |
+| **Authentication** (`auth.py`, v2) | Optional HMAC-SHA256 tag on every datagram |
+| **Persistence** (`persistence.py`) | Local JSON save and load; never touches the network |
 
 In v2 the receive thread still only decodes, filters duplicates (by peer
 ID) and answers NACKs for its own events from its send history. Everything
 that touches the canvas, including sync and recovery timers, runs on the
-UI thread in `session.Session`, driven by `CanvasApp.tick()` at least every
-50 ms.
+UI thread in `session.Session`.
 
 - **Network layer:** IPv4 Class D multicast group `239.255.0.1`. Hosts join
   with `IP_ADD_MEMBERSHIP` and leave with `IP_DROP_MEMBERSHIP`. When a socket
   joins or leaves, the OS sends IGMP messages so that switches and routers know
   which hosts want the group's traffic. IGMP only manages membership. It does
   not carry application data.
-- **Transport layer:** UDP datagrams on port `5005`. There are no connections,
-  handshakes or retransmissions.
-- **Application layer:** one fixed 13-byte binary frame per event, packed with
-  `struct`.
+- **Transport layer:** UDP datagrams on port `5005`. UDP itself has no
+  connections, handshakes or retransmissions; v2 adds application-level
+  recovery on top.
+- **Application layer:** binary messages packed with `struct`: a fixed
+  13-byte frame in v1, a 20-byte header plus payload in v2.
 - **Concurrency:** a background thread receives frames and puts decoded events
   on a `queue.Queue`. Only the main thread touches the canvas and `curses`.
 
@@ -112,63 +175,131 @@ At most 256 senders are tracked; the least recently heard is evicted first.
 The app's status line shows **Miss**, the skipped numbers that have not
 arrived, and **Dup**, the duplicates dropped.
 
-The tracker **detects** loss but does **not recover** it. A missing event
-stays missing on that peer's canvas. The packet format is unchanged, so this
-needs nothing new from other peers.
+The tracker on its own **detects** loss but does **not recover** it. In v1 a
+missing event stays missing on that peer's canvas; the packet format is
+unchanged, so this needs nothing new from other peers. In v2 the tracker is
+keyed by peer ID, and `recovery.py` uses its missing numbers to request
+repairs (see [Packet-loss recovery](#packet-loss-recovery-v2-only-recoverypy)).
 
-## Setup
+## Requirements and setup
 
-1. Install Python 3.10 or newer.
-2. Install the one runtime dependency. On Windows this is `windows-curses`,
-   because Python on Windows has no `curses` module; Linux and macOS need
-   nothing extra.
+### Requirements
 
-   ```sh
-   python -m pip install -r requirements.txt
-   ```
+- **Python 3.10 or newer** on every computer.
+- **Windows:** the `windows-curses` package, because Python on Windows has
+  no `curses` module. `requirements.txt` installs it on Windows only.
+- **macOS and Linux:** nothing extra; `curses` is part of Python.
+- A terminal window of at least **62 columns × 23 rows**. On Windows, use
+  Windows Terminal rather than the classic console.
+- Everything except the terminal UI, and all tests, use only the standard
+  library.
 
-   The protocol, network, tracker and canvas modules and all tests use only
-   the standard library.
-3. Find this laptop's IPv4 address on the network you will use (run
-   `ipconfig` and look at the Wi-Fi adapter). The Wi-Fi address changes when
-   you reconnect, so check it before every session.
-4. Either set `INTERFACE_ADDRESS` in `config.py` to that address or pass it on
-   the command line with `--interface`.
+### Windows setup (PowerShell)
 
-**Why the interface matters:** with `INTERFACE_ADDRESS = "0.0.0.0"`, the OS
-picks the multicast interface. On machines with virtual adapters (VirtualBox,
-Hyper-V, VPNs) it may pick the wrong one. On the development laptop it picked
-a VirtualBox host-only adapter (`192.168.56.1`).
+```powershell
+cd <PATH_TO_PROJECT>\terminal-canvas
+python --version
+python -m pip install -r requirements.txt     # installs windows-curses
+ipconfig                                      # read "IPv4 Address" under the Wi-Fi adapter
+```
 
-## Running the application
+### macOS setup (Terminal)
 
 ```sh
-python app.py                          # uses INTERFACE_ADDRESS from config.py
-python app.py --interface 192.168.1.23
-python app.py --load drawing.json      # start from a saved canvas
-python app.py --save drawing.json      # save the canvas when the app exits
-python app.py --protocol 2             # use protocol v2 (every peer must)
-python app.py --protocol 2 --simulate-loss 20   # drop 20% of received datagrams
+cd <PATH_TO_PROJECT>/terminal-canvas
+python3 --version
+python3 -m pip install -r requirements.txt    # nothing extra is installed on macOS
+ipconfig getifaddr en0                        # usually the Wi-Fi address
+```
+
+`en0` is usually Wi-Fi, but not always. If the command prints nothing, find
+the active interface and its `inet` address with `ifconfig`.
+
+### Network conditions
+
+- All peers must be on the **same subnet**: with TTL 1, multicast is not
+  routed.
+- The network must **forward multicast between clients**. Campus Wi-Fi often
+  isolates clients; a phone hotspot, a home router known to allow
+  client-to-client traffic, or Ethernet is safer.
+- **Disable VPN clients** (such as Cloudflare WARP or McAfee VPN) during a
+  session.
+- **Firewalls** must allow Python to receive UDP on port 5005. On Windows,
+  allow Python on **Private** networks when asked, or mark the network
+  Private. On macOS, allow incoming connections for Python when asked.
+
+### Choosing the interface
+
+Always pass **this computer's own** current IPv4 address with
+`--interface`:
+
+- The default `INTERFACE_ADDRESS` in `config.py` is a fixed address from the
+  development laptop. It is wrong on any other computer or network.
+- The Wi-Fi address changes when the laptop reconnects, so check it before
+  every session.
+- Ignore virtual adapters (VirtualBox `192.168.56.x`, Hyper-V, WSL, VPNs).
+  With `INTERFACE_ADDRESS = "0.0.0.0"` the OS picks the multicast
+  interface itself, and on the development laptop it picked a VirtualBox
+  host-only adapter (`192.168.56.1`).
+- If the address is not one of this computer's, the app exits at startup
+  with `Could not join 239.255.0.1:5005 on interface ...`.
+
+### Launch commands
+
+Use `python` on Windows and `python3` on macOS. All options come from
+`python app.py --help`:
+
+```sh
+python app.py --interface 192.168.1.23            # protocol v1 (the default)
+python app.py --protocol 2 --interface <WINDOWS_IP>   # Windows peer, protocol v2
+python3 app.py --protocol 2 --interface <MAC_IP>      # macOS peer, protocol v2
+python app.py --protocol 2 --auth --interface <IP>    # v2 with HMAC authentication
+python app.py --protocol 2 --simulate-loss 20 --interface <IP>   # drop 20% of received datagrams
+python app.py --load drawing.json --save drawing.json --interface <IP>
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `--interface ADDR` | IPv4 address of the network interface to use |
+| `--interface ADDR` | IPv4 address of the network interface to use (default: `INTERFACE_ADDRESS` in `config.py`) |
 | `--protocol {1,2}` | Wire protocol. `1` (default) is the original 13-byte frame. `2` is the versioned format described in [Protocol v2](#protocol-v2-protocol_v2py). Every peer in a session must use the same protocol |
-| `--simulate-loss PERCENT` | Drop this percentage (0–90) of received datagrams on purpose, to demonstrate loss recovery on one laptop. The top line then shows `SIMULATED LOSS` |
+| `--simulate-loss PERCENT` | Drop this percentage (0–90) of received datagrams on purpose, to demonstrate loss recovery. The top line then shows `SIMULATED LOSS` |
+| `--auth` | Authenticate every message with HMAC-SHA256 using a shared passphrase. Needs `--protocol 2` |
 | `--load FILE` | Load `FILE` before joining the group. If it cannot be loaded, the app prints why and exits with status 1 without joining |
 | `--save FILE` | Save the canvas to `FILE` when the app exits (`q`, Ctrl+C, or an error). The app exits at startup if `FILE`'s folder does not exist |
 
-Without these options the app behaves as before and creates no file unless
-you press `S`. See [Saving and loading](#saving-and-loading-persistencepy).
+Without `--load` or `--save` the app creates no file unless you press `S`.
 
-The terminal must be at least 62 columns by 23 rows. If it is smaller, the app
-asks you to enlarge it. The top line shows the group, the interface and the
-source address the app sends from. The status line below the canvas shows:
+## Usage
 
-- the brush, colour, pen state and cursor position
-- **Sent** and **Recv**: events sent and received
-- **Miss** and **Dup**: the gap and duplicate counters described above
+### Start peers and connect them
+
+1. On each computer, start the app with the **same `--protocol`** and its
+   **own `--interface`** address. Every peer joins
+   `239.255.0.1:5005` automatically; there is nothing else to configure.
+2. With protocol v2, the first peer shows `Requesting the canvas from other
+   peers...`. Alone in the group, it gives up after about 3 seconds and
+   shows `Sync none`. This is expected.
+3. A peer started later shows `Synced`: it received the current canvas from
+   a peer that was already running (late join).
+
+To try it on one computer, open two terminals and run the same command in
+each. Multicast loopback is enabled, and each peer ignores its own frames.
+
+### Screen
+
+- **Top line:** the group, the interface and the source address the app
+  sends from. In v2 also `v2 peer xxxxxxxx` (this session's peer ID), and
+  `SIMULATED LOSS n%` or `HMAC on` when enabled.
+- **Status line:**
+  - brush, colour, pen state and cursor `(x,y)`;
+  - **Sent** and **Recv**: drawing events sent and received;
+  - **Miss** and **Dup**: the gap and duplicate counters
+    (see [below](#duplicate-detection-and-gap-tracking-trackerpy));
+  - in v2: `Sync 1/3`, `Synced` or `Sync none`; `Rec n Lost m` once losses
+    occur; `AuthFail n` once frames are rejected.
+- **Bottom line:** messages, or the key help.
+
+### Draw and clear
 
 | Key | Action |
 | --- | --- |
@@ -195,23 +326,43 @@ What happens when you draw:
   because printing them to the console would corrupt the curses screen. The
   file is created only if something is logged.
 
-To try it on one laptop, open two terminals and run `python app.py` in each.
+### Synchronise state (v2)
 
-**Single-laptop v2 demonstration.** Run each command in its own terminal,
-and use the same options in every terminal:
+Synchronisation is automatic. A v2 peer requests the canvas at startup and
+merges the snapshot with anything drawn meanwhile. To bring a peer up to
+date, restart it with the same command. During heavy loss, unrecoverable
+events also trigger a snapshot request automatically, at most once every
+5 s. See [Late-join synchronization](#late-join-synchronization-v2-only-syncpy).
 
-1. Start the first peer: `python app.py --protocol 2`. Draw something. The
-   status line shows `Sync none`, because no other peer answered its
-   request.
-2. Start a second peer the same way. It shows `Synced`, and the drawing
-   from step 1 appears: this is the late join.
-3. Draw the same cell in both terminals at once. Both end with the same
-   character: this is the Lamport conflict resolution.
-4. Restart one terminal with `--simulate-loss 30`. Its status line shows
-   `Rec n Lost m` while recovery repairs the losses.
-5. For authentication, set `TERMINAL_CANVAS_PASSPHRASE` in every terminal
-   and add `--auth`. A terminal with a different passphrase shows
-   `AuthFail n` and never receives anything.
+### Use authentication
+
+Every peer needs `--protocol 2 --auth` **and the same passphrase**. The app
+reads it from the `TERMINAL_CANVAS_PASSPHRASE` environment variable if it is
+set, otherwise from a hidden `Shared passphrase:` prompt (recommended,
+because it stays out of the shell history). An empty passphrase is rejected.
+
+```powershell
+# Windows (PowerShell): prompt
+python app.py --protocol 2 --auth --interface <WINDOWS_IP>
+```
+
+```sh
+# macOS (Terminal): environment variable, removed afterwards
+export TERMINAL_CANVAS_PASSPHRASE='<SHARED_DEMO_PASSPHRASE>'
+python3 app.py --protocol 2 --auth --interface <MAC_IP>
+unset TERMINAL_CANVAS_PASSPHRASE
+```
+
+A peer with a different passphrase, or without `--auth`, exchanges nothing
+with the group, and `AuthFail n` counts the rejected frames.
+Authentication protects integrity only: traffic is **not encrypted**.
+
+### Save and restore the canvas
+
+Press `S` to save and `L` to restore, or use `--save` and `--load`. Saving
+and loading are local: other peers are not changed. See
+[Saving and loading](#saving-and-loading-persistencepy) for which file each
+key uses and how files are validated.
 
 ## Saving and loading (`persistence.py`)
 
@@ -276,44 +427,28 @@ UTF-8 JSON:
   resolution, must use a new version number. Version 1 readers reject unknown
   cell fields instead of silently ignoring them.
 
-## Two-laptop test (Stage 4, still to be done)
-
-1. Put both laptops on the same network. Campus Wi-Fi often isolates clients,
-   so prefer a phone hotspot or home router known to allow client-to-client
-   traffic, or connect both laptops by Ethernet.
-2. On each laptop, run `ipconfig` and note the Wi-Fi IPv4 address.
-3. Copy the project folder to both laptops and run
-   `python -m pip install -r requirements.txt` on each.
-4. Disable VPN clients (such as Cloudflare WARP or McAfee VPN) for the test.
-5. On laptop B, start Wireshark on the Wi-Fi interface with the display filter
-   `ip.dst == 239.255.0.1 || igmp`.
-6. On each laptop, run `python app.py --interface <its own address>`. If
-   Windows Firewall asks, allow Python on **Private** networks. If the network
-   is marked Public, either switch it to Private or add an inbound rule for UDP
-   port 5005.
-7. Check each of these:
-   - Draw on A and confirm it appears on B.
-   - Draw on B and confirm it appears on A.
-   - Press `X` on one laptop and confirm both canvases clear.
-8. The test passes when all of these hold:
-   - Drawing shows up in both directions.
-   - Wireshark shows IGMP membership reports for `239.255.0.1`.
-   - Wireshark shows UDP datagrams to port 5005 with a UDP length of 21 bytes
-     (an 8-byte header plus the 13-byte frame). The data starts with `ca 55`.
-9. Save the capture (`.pcapng`) and photos of both screens as evidence.
-
-**Troubleshooting:**
+## Troubleshooting
 
 - *Nothing arrives in either direction:* the network probably blocks
-  multicast. Try another network.
-- *Traffic works in one direction only:* the receiving laptop's firewall is
-  probably blocking it.
+  multicast between clients. Try a phone hotspot, a home router or Ethernet,
+  and disable VPN clients.
+- *Traffic works in one direction only:* the receiving computer's firewall
+  is probably blocking it. On Windows, allow Python on Private networks or
+  add an inbound rule for UDP port 5005; on macOS, allow incoming
+  connections for Python.
+- *Both peers run but see nothing from each other:* check that both use the
+  same `--protocol` and the same `--auth` setting and passphrase. A v2 peer
+  drops v1 frames and logs a warning to `terminal_canvas.log`.
 - *The app fails at startup with "Could not join":* the interface address is
-  wrong. Run `ipconfig` again.
-- *The app freezes in a classic console window:* clicking inside a classic
-  console starts text selection (the window title begins with "Select"), which
-  pauses the program. Press Esc. This happened once during the one-laptop
-  demonstration. Running the app in Windows Terminal avoids this.
+  wrong. Run `ipconfig` (Windows) or `ipconfig getifaddr en0` (macOS) again.
+- *`Terminal too small: need 62x23`:* enlarge the window or reduce the font
+  size.
+- *The app freezes in a classic Windows console window:* clicking inside a
+  classic console starts text selection (the window title begins with
+  "Select"), which pauses the program. Press Esc, or use Windows Terminal.
+
+To check the traffic in Wireshark, capture on the interface passed to
+`--interface` with the display filter `ip.dst == 239.255.0.1 || igmp`.
 
 ## Packet format (protocol v1, the default)
 
@@ -707,26 +842,33 @@ auth.derive_key(passphrase) -> AuthKey
 `CanvasApp(..., session=Session(...))` turns on v2 behaviour in the app.
 Without a session, `CanvasApp` behaves exactly as in v1.
 
-## Running tests
+## Testing and validation
+
+### Automated tests
 
 From the project root:
 
 ```sh
 python -m compileall -q .
 python -m unittest discover -s tests -v
+python -m pytest            # optional; also reports subtests
 ```
 
+**Latest result** (24 October 2026, Python 3.14.3, pytest 9.1.1, Windows
+development laptop): **396 tests passed, 313 subtests passed**. `unittest`
+also ran all 396 tests successfully, with none skipped.
+
 The tests need no third-party packages, no terminal, no curses and no
-external network. The suite has 396 tests:
+external network.
 
 | File | Tests | Covers |
 | --- | --- | --- |
-| `test_protocol.py` | 25 | v1 frame (unchanged) |
-| `test_network.py` | 52 | v1 networking (unchanged) |
-| `test_tracker.py` | 19 | duplicate and gap tracking (unchanged) |
-| `test_canvas.py` | 19 | canvas state (unchanged) |
-| `test_app.py` | 40 | UI logic, run loop, `main()` (unchanged) |
-| `test_persistence.py` | 52 | Phase F: save/load (unchanged since Phase F) |
+| `test_protocol.py` | 25 | v1 frame |
+| `test_network.py` | 52 | v1 networking |
+| `test_tracker.py` | 19 | duplicate and gap tracking |
+| `test_canvas.py` | 19 | canvas state |
+| `test_app.py` | 40 | UI logic, run loop, `main()` |
+| `test_persistence.py` | 52 | Phase F: save/load |
 | `test_protocol_v2.py` | 25 | Phase A: v2 header, validation, peer IDs |
 | `test_network_v2.py` | 27 | Phase A: v2 receive path, simulated and loopback v2 peers, `--protocol` |
 | `test_lamport.py` | 31 | Phase D: clock, last-writer-wins, arrival-order independence |
@@ -747,44 +889,44 @@ receive path. A test can:
 Sync and recovery timers are driven by a fake clock, so these tests are
 deterministic and do not depend on real Wi-Fi loss.
 
-**Multicast skips.** Thirteen tests use real multicast on this host:
-
-- `LoopbackMulticastTests`
-- `TwoAppLoopbackTests`
-- `V2LoopbackMulticastTests`
-- `LoopbackLateJoinTests`
-
-The probe uses `INTERFACE_ADDRESS` from `config.py`. If that address is
-not one of this computer's current addresses (it changes with the Wi-Fi
-network), these tests are skipped, not failed. Set it to the current
-address from `ipconfig` to run them.
-
 | Kind | Where | Touches the network? |
 | --- | --- | --- |
 | Pure unit tests | `test_protocol.py`, `test_canvas.py`, `test_tracker.py`; app logic, run loop and `main()` cleanup in `test_app.py`; `HandleDatagramTests` (including duplicate and gap handling) and `PeerStateTests` in `test_network.py` | No |
 | Mocked tests | `MockedSocketTests` and `MockedSpecificInterfaceTests` check socket options, membership join/leave, interface pinning, the receive thread and failure cleanup. `CursesViewTests` checks rendering and key translation with a fake curses module | No |
-| Local multicast tests | `LoopbackMulticastTests` (peers), `TwoAppLoopbackTests` (two `CanvasApp`s), `V2LoopbackMulticastTests` and `LoopbackLateJoinTests` (v2). They use real multicast on this laptop, on a random port from 40000 to 49999 | Yes, this host only |
+| Local multicast tests | `LoopbackMulticastTests` (peers), `TwoAppLoopbackTests` (two `CanvasApp`s), `V2LoopbackMulticastTests` and `LoopbackLateJoinTests` (v2). They use real multicast on this host, on a random port from 40000 to 49999 | Yes, this host only |
 | Simulated-network tests | All v2 integration tests in `test_network_v2.py`, `test_lamport.py`, `test_sync.py`, `test_recovery.py` and `test_auth.py`, through `tests/simnet.py` | No |
 
-The local multicast tests are **skipped** automatically if the host cannot
-send and receive multicast.
+**Multicast skips.** The thirteen local multicast tests probe
+`INTERFACE_ADDRESS` from `config.py`. If that address is not one of this
+computer's current addresses (it changes with the Wi-Fi network), they are
+**skipped**, not failed. Set it to the current address to run them.
 
-**One-laptop evidence** is in `evidence/one_laptop_2026-10-21/`:
+### Windows–macOS peer test
 
-- screenshots of two app processes (peers A and B) running side by side
-- `demo_capture.pcapng`, a Wireshark/TShark capture of the Wi-Fi interface
-  during that run
-- `capture_analysis.txt`, which contains:
-  - the IGMPv3 join and leave reports
-  - 79 datagrams with UDP length 21
-  - a hex dump of the first DRAW frame
+The application was tested successfully between a **Windows laptop and a
+macOS laptop** on the same network, both running protocol v2 with their own
+`--interface` address. Following the sequence in
+[`LIVE_DEMO_GUIDE.md`](LIVE_DEMO_GUIDE.md), these scenarios were verified:
 
-This evidence shows the laptop transmitting; it does not show reception on
-another laptop.
+| Scenario | Result |
+| --- | --- |
+| Start-up and group join on both platforms; first peer alone shows `Sync none` | Passed |
+| Drawing from Windows to macOS and from macOS to Windows, including colours and erasing | Passed |
+| `X` clears the canvas on both laptops | Passed |
+| Late join: a restarted macOS peer receives everything drawn while it was offline (`Synced`) | Passed |
+| Conflict resolution: the same cell drawn on both laptops ends with the same character on both | Passed |
+| Packet-loss recovery with `--simulate-loss 30`: `Rec`/`Lost` counters appear and the canvases converge | Passed |
+| HMAC authentication with a shared passphrase; a mismatched peer exchanges nothing and shows `AuthFail` | Passed |
+| Local save and load with `S` / `L`; the other peer is unchanged | Passed |
 
-**Not yet performed:** a test between separate physical devices and a
-Wireshark capture on the receiving laptop. Each IPv4 packet should be 41 bytes
-(55 bytes on the wire including the 14-byte Ethernet header).
+### What has not been tested
+
+- This was a functional test with two physical peers. No latency,
+  throughput or packet-loss measurements were taken.
+- Loss recovery was exercised with simulated loss, not with measured real
+  Wi-Fi loss.
+- Groups of more than two physical computers, Linux peers, networks that
+  filter multicast, and operation across routers were not tested.
 
 ## Limitations
 
@@ -835,7 +977,41 @@ Wireshark capture on the receiving laptop. Each IPv4 packet should be 41 bytes
   - Authentication uses one group key with a fixed salt, offers only
     limited replay protection, and no confidentiality.
   - The Lamport clock stops at 2³²−1.
-  - None of this has been validated between two physical computers yet.
 - **LAN only.** With TTL 1, frames are not routed beyond the local subnet.
 - **The network can block multicast.** Wi-Fi client isolation, VPNs and
   managed switches without IGMP snooping may drop or flood multicast.
+- **Testing scope.** See [What has not been tested](#what-has-not-been-tested).
+
+## Project structure
+
+```text
+terminal-canvas/
+├── app.py              Entry point: CLI options, curses UI (CanvasApp, CursesView), main loop
+├── config.py           Multicast group, port, TTL, loopback, interface, canvas size
+├── canvas.py           Canvas replica; per-cell Lamport stamps and last-writer-wins
+├── network.py          Multicast sockets, receive thread, v1/v2 receive paths, send history
+├── tracker.py          Per-sender duplicate detection and gap tracking
+├── protocol.py         Protocol v1: 13-byte frame encode/decode
+├── protocol_v2.py      Protocol v2: 20-byte header, seven message types, peer IDs
+├── session.py          v2 coordinator on the UI thread (stamping, sync, recovery timers)
+├── lamport.py          Lamport clock
+├── sync.py             Late-join synchronisation (STATE_REQ / STATE_RESP)
+├── recovery.py         Heartbeat-based loss detection and NACK scheduling
+├── auth.py             PBKDF2 key derivation and HMAC-SHA256 tags
+├── persistence.py      Atomic, validated JSON save/load of the canvas
+├── requirements.txt    windows-curses on Windows only
+├── LIVE_DEMO_GUIDE.md  Step-by-step Windows–macOS demonstration
+├── PROJECT_ENHANCEMENT_ROADMAP.docx  Design of the v2 enhancements
+├── evidence/           Earlier one-laptop v1 packet capture and analysis
+└── tests/              396 automated tests; simnet.py is the in-memory multicast network
+```
+
+`canvas.json` (the default save file) and any files given to `--save` are
+local data created at runtime and are not part of the project.
+
+## Live demo
+
+The faculty demonstration (Windows and macOS launch commands, the
+demonstration sequence, authentication, persistence, Wireshark filters,
+troubleshooting and a checklist) is in
+[`LIVE_DEMO_GUIDE.md`](LIVE_DEMO_GUIDE.md).
